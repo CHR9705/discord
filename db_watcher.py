@@ -2,15 +2,24 @@ import sqlite3
 import os
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
-import config
+from . import config
 
 
 class DBWatcher:
-    def __init__(self, on_new_keys_callback):
-        """on_new_keys_callback: a function to call with a list of new keys."""
-        self.on_new_keys_callback = on_new_keys_callback
+    def __init__(self, on_new_rows_callback):  
+        self.on_new_rows_callback = on_new_rows_callback
         self.last_seen_key = self._get_max_existing_key()
         self.observer = None
+        self.column_names = self._get_column_names() 
+
+    def _get_column_names(self):  # 
+            """Fetch all real column names (rowid is implicit, so we add it manually)."""
+            conn = sqlite3.connect(config.DB_PATH)
+            cur = conn.cursor()
+            cur.execute(f"PRAGMA table_info({config.TABLE_NAME})")
+            cols = [row[1] for row in cur.fetchall()]
+            conn.close()
+            return cols
 
     def _get_max_existing_key(self):
         conn = sqlite3.connect(config.DB_PATH)
@@ -20,22 +29,30 @@ class DBWatcher:
         conn.close()
         return result if result is not None else 0
 
-    def _get_new_keys(self):
+    def _get_new_rows(self):  # 🔶 renamed: _get_new_keys → _get_new_rows
         conn = sqlite3.connect(config.DB_PATH)
         cur = conn.cursor()
+        select_cols = f"{config.KEY_COLUMN}, *"   # 🟢 NEW — was: f"{KEY_COLUMN}, {DISPLAY_COLUMN}"
         cur.execute(
-            f"SELECT {config.KEY_COLUMN} FROM {config.TABLE_NAME} WHERE {config.KEY_COLUMN} > ? ORDER BY {config.KEY_COLUMN} ASC",
+            f"SELECT {select_cols} FROM {config.TABLE_NAME} "
+            f"WHERE {config.KEY_COLUMN} > ? ORDER BY {config.KEY_COLUMN} ASC",
             (self.last_seen_key,)
         )
         rows = cur.fetchall()
         conn.close()
-        return [row[0] for row in rows]
+        results = []
+        for row in rows:
+            row_dict = {"rowid": row[0]}
+            for col_name, value in zip(self.column_names, row[1:]):
+                row_dict[col_name] = value
+            results.append(row_dict)
+        return results 
 
     def check_for_updates(self):
-        new_keys = self._get_new_keys()
-        if new_keys:
-            self.last_seen_key = new_keys[-1]
-            self.on_new_keys_callback(new_keys)
+        new_rows = self._get_new_rows()         
+        if new_rows:
+            self.last_seen_key = new_rows[-1]["rowid"]   
+            self.on_new_rows_callback(new_rows)
 
     def start(self):
         print(f"Starting from key: {self.last_seen_key}")
